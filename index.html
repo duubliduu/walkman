@@ -2,24 +2,35 @@
 <html>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <title>Walkman</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   html, body, #map { margin: 0; height: 100%; background: #000; }
   #hud { position: fixed; top: 0; left: 0; right: 0; z-index: 1000; display: flex; justify-content: space-between;
-         padding: 10px 16px; font: bold 16px monospace; color: #ff0; background: rgba(0,0,0,.75); }
+         padding: calc(10px + env(safe-area-inset-top, 0px)) 16px 10px; font: bold 16px monospace; color: #ff0; background: rgba(0,0,0,.75); }
   #msg { position: fixed; inset: 0; z-index: 1001; display: flex; align-items: center; justify-content: center;
          flex-direction: column; font: bold 28px monospace; color: #ff0; background: rgba(0,0,0,.8); text-align: center; }
   #msg button { margin-top: 20px; font: bold 20px monospace; padding: 12px 24px; background: #ff0; border: 0; }
+  #pad { position: fixed; right: 16px; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); z-index: 1000;
+         display: grid; grid-template-columns: repeat(3, 52px); gap: 4px; }
+  #pad[hidden] { display: none; }
+  #pad button { height: 52px; font: bold 22px monospace; color: #ff0; background: rgba(0,0,0,.7); border: 2px solid #ff0;
+                border-radius: 8px; touch-action: manipulation; }
+  #pad button:active { background: #ff0; color: #000; }
+  #gps { position: fixed; left: 16px; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); z-index: 1000;
+         font: 12px monospace; color: #ff0; background: rgba(0,0,0,.7); padding: 6px 8px; }
   .leaflet-tile-pane { filter: invert(1) hue-rotate(200deg) brightness(.7); }
 </style>
 </head>
 <body>
 <div id="map"></div>
 <div id="hud"><span id="score">SCORE 0</span><span id="dist">0 m</span><span id="lives">♥♥♥</span></div>
-<div id="msg">WALKMAN<br><small style="font-size:14px">Walk to eat dots. Avoid ghosts.<br>Arrow keys = simulate walking.</small><button id="start">START</button></div>
+<div id="msg">WALKMAN<br><small style="font-size:14px">Walk to eat dots. Avoid ghosts.<br>No GPS? Use the arrows.</small><button id="start">START</button></div>
+<div id="pad" hidden><span></span><button data-d="0,5">▲</button><span></span><button data-d="-5,0">◀</button><span></span><button data-d="5,0">▶</button><span></span><button data-d="0,-5">▼</button><span></span></div>
+<div id="gps">GPS: waiting</div>
 <script>
 const DOT_SPACING = 25, FIELD_RADIUS = 200, EAT_RADIUS = 12, CATCH_RADIUS = 10;
 const GHOST_SPEED = 0.9, POWER_MS = 30000; // m/s, slower than walking (~1.4)
@@ -109,14 +120,22 @@ function end(text) {
 
 $('start').onclick = () => {
   $('msg').style.display = 'none';
+  $('pad').hidden = false;
+  const lock = () => navigator.wakeLock?.request('screen').catch(() => {});
+  lock(); document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && lock());
   if (!navigator.geolocation) return startSim();
   navigator.geolocation.watchPosition(
-    p => { if (!sim && (p.coords.accuracy < 50 || !started)) moveTo(L.latLng(p.coords.latitude, p.coords.longitude)); },
-    startSim, { enableHighAccuracy: true, maximumAge: 0 });
+    p => { $('gps').textContent = 'GPS ±' + Math.round(p.coords.accuracy) + ' m'; if (!sim && (p.coords.accuracy < 50 || !started)) moveTo(L.latLng(p.coords.latitude, p.coords.longitude)); },
+    e => { $('gps').textContent = 'GPS off: ' + e.message; startSim(); }, { enableHighAccuracy: true, maximumAge: 0 });
 };
 function startSim() { if (!started) { sim = true; moveTo(map.getCenter()); } }
 
-// Simulate walking with arrow keys (5 m per press)
+// Simulate walking: on-screen pad or arrow keys (5 m per press)
+document.querySelectorAll('#pad button').forEach(b => b.onclick = () => {
+  if (!pos) return;
+  sim = true;
+  moveTo(offset(pos, ...b.dataset.d.split(',').map(Number)));
+});
 addEventListener('keydown', e => {
   const k = { ArrowUp: [0, 5], ArrowDown: [0, -5], ArrowLeft: [-5, 0], ArrowRight: [5, 0] }[e.key];
   if (!k || !pos) return;
