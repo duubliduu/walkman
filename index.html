@@ -28,7 +28,7 @@
 <body>
 <div id="map"></div>
 <div id="hud"><span id="score">SCORE 0</span><span id="dist">0 m</span><span id="lives">♥♥♥</span></div>
-<div id="msg">WALKMAN<br><small style="font-size:14px">Walk to eat dots. Avoid ghosts.<br>No GPS? Use the arrows.</small><button id="start">START</button></div>
+<div id="msg">WALKMAN<br><small style="font-size:14px">Walk the streets to eat dots. Avoid ghosts.<br>No GPS? Use the arrows.</small><button id="start">START</button></div>
 <div id="pad" hidden><span></span><button data-d="0,5">▲</button><span></span><button data-d="-5,0">◀</button><span></span><button data-d="5,0">▶</button><span></span><button data-d="0,-5">▼</button><span></span></div>
 <div id="gps">GPS: waiting</div>
 <script>
@@ -46,21 +46,72 @@ const $ = id => document.getElementById(id);
 const offset = (ll, dx, dy) => L.latLng(ll.lat + dy / 111320, ll.lng + dx / (111320 * Math.cos(ll.lat * Math.PI / 180)));
 const dist = (a, b) => map.distance(a, b);
 
-function setup(origin) {
-  map.setView(origin, 18);
-  player = L.circleMarker(origin, { radius: 10, color: '#ff0', fillColor: '#ff0', fillOpacity: 1 }).addTo(map);
-  for (let x = -FIELD_RADIUS; x <= FIELD_RADIUS; x += DOT_SPACING)
-    for (let y = -FIELD_RADIUS; y <= FIELD_RADIUS; y += DOT_SPACING) {
-      if (Math.hypot(x, y) > FIELD_RADIUS || Math.hypot(x, y) < EAT_RADIUS) continue;
-      const power = Math.abs(x) === Math.abs(y) && Math.abs(x) >= 125 && Math.abs(x) < 150;
-      const ll = offset(origin, x, y);
-      dots.push({ ll, power, m: L.circleMarker(ll, { radius: power ? 7 : 3, color: '#fcb', fillOpacity: 1, weight: 0, fillColor: '#fcb' }).addTo(map) });
+// Walkable roads from OpenStreetMap, sampled into dots every DOT_SPACING m
+const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.private.coffee/api/interpreter', 'https://maps.mail.ru/osm/tools/overpass/api/interpreter'];
+async function roadPoints(origin) {
+  const q = `[out:json][timeout:15];way["highway"~"^(footway|path|pedestrian|residential|living_street|service|unclassified|tertiary|secondary|primary|cycleway|steps|track)$"](around:${FIELD_RADIUS},${origin.lat},${origin.lng});out geom;`;
+  let data;
+  for (const url of OVERPASS) {
+    try {
+      const res = await fetch(url, { method: 'POST', body: 'data=' + encodeURIComponent(q), signal: AbortSignal.timeout(12000) });
+      if (res.ok) { data = await res.json(); break; }
+    } catch (e) {}
+  }
+  if (!data) throw new Error('no overpass server');
+  const kx = 111320 * Math.cos(origin.lat * Math.PI / 180), ky = 111320;
+  const toXY = g => [(g.lon - origin.lng) * kx, (g.lat - origin.lat) * ky];
+  const pts = [];
+  for (const way of data.elements) {
+    const g = way.geometry.map(toXY);
+    let carry = 0;
+    for (let i = 1; i < g.length; i++) {
+      const [x0, y0] = g[i - 1], [x1, y1] = g[i], len = Math.hypot(x1 - x0, y1 - y0);
+      for (let t = carry; t < len; t += DOT_SPACING) pts.push([x0 + (x1 - x0) * t / len, y0 + (y1 - y0) * t / len]);
+      carry = (carry - len) % DOT_SPACING; if (carry < 0) carry += DOT_SPACING;
     }
+  }
+  // Clip to field, drop near-duplicates where roads cross
+  const kept = [];
+  for (const p of pts) {
+    const r = Math.hypot(...p);
+    if (r > FIELD_RADIUS || r < EAT_RADIUS) continue;
+    if (kept.some(k => Math.hypot(k[0] - p[0], k[1] - p[1]) < DOT_SPACING * 0.6)) continue;
+    kept.push(p);
+  }
+  if (kept.length < 10) throw new Error('too few roads');
+  return kept;
+}
+
+function gridPoints() {
+  const pts = [];
+  for (let x = -FIELD_RADIUS; x <= FIELD_RADIUS; x += DOT_SPACING)
+    for (let y = -FIELD_RADIUS; y <= FIELD_RADIUS; y += DOT_SPACING)
+      if (Math.hypot(x, y) <= FIELD_RADIUS && Math.hypot(x, y) >= EAT_RADIUS) pts.push([x, y]);
+  return pts;
+}
+
+let loading = false;
+async function setup(origin) {
+  if (loading) return;
+  loading = true;
+  map.setView(origin, 18);
+  $('gps').textContent = 'Loading roads…';
+  let pts;
+  try { pts = await roadPoints(origin); $('gps').textContent = pts.length + ' dots on roads'; }
+  catch (e) { pts = gridPoints(); $('gps').textContent = 'Roads failed, grid mode'; }
+  // Power pellet = farthest dot in each quadrant
+  const power = new Set([0, 1, 2, 3].map(qd => pts.reduce((best, p, i) =>
+    (p[0] >= 0) === (qd & 1 ? true : false) && (p[1] >= 0) === (qd & 2 ? true : false) && (best < 0 || Math.hypot(...p) > Math.hypot(...pts[best])) ? i : best, -1)));
+  pts.forEach((p, i) => {
+    const ll = offset(origin, ...p), pw = power.has(i);
+    dots.push({ ll, power: pw, m: L.circleMarker(ll, { radius: pw ? 8 : 4, weight: 0, fillOpacity: 1, fillColor: '#fcb' }).addTo(map) });
+  });
   GHOST_COLORS.forEach((c, i) => {
     const a = i * Math.PI / 2 + Math.PI / 4;
     const ll = offset(origin, Math.cos(a) * FIELD_RADIUS, Math.sin(a) * FIELD_RADIUS);
     ghosts.push({ ll, home: ll, color: c, m: L.circleMarker(ll, { radius: 9, color: c, fillColor: c, fillOpacity: 1 }).addTo(map) });
   });
+  player = L.circleMarker(origin, { radius: 10, color: '#ff0', fillColor: '#ff0', fillOpacity: 1 }).addTo(map);
   pos = origin;
   started = true;
   setInterval(tick, 1000);
@@ -120,15 +171,14 @@ function end(text) {
 
 $('start').onclick = () => {
   $('msg').style.display = 'none';
-  $('pad').hidden = false;
   const lock = () => navigator.wakeLock?.request('screen').catch(() => {});
   lock(); document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && lock());
   if (!navigator.geolocation) return startSim();
   navigator.geolocation.watchPosition(
-    p => { $('gps').textContent = 'GPS ±' + Math.round(p.coords.accuracy) + ' m'; if (!sim && (p.coords.accuracy < 50 || !started)) moveTo(L.latLng(p.coords.latitude, p.coords.longitude)); },
+    p => { if (started) $('gps').textContent = 'GPS ±' + Math.round(p.coords.accuracy) + ' m'; if (!sim && (p.coords.accuracy < 50 || !started)) moveTo(L.latLng(p.coords.latitude, p.coords.longitude)); },
     e => { $('gps').textContent = 'GPS off: ' + e.message; startSim(); }, { enableHighAccuracy: true, maximumAge: 0 });
 };
-function startSim() { if (!started) { sim = true; moveTo(map.getCenter()); } }
+function startSim() { $('pad').hidden = false; if (!started) { sim = true; moveTo(map.getCenter()); } }
 
 // Simulate walking: on-screen pad or arrow keys (5 m per press)
 document.querySelectorAll('#pad button').forEach(b => b.onclick = () => {
