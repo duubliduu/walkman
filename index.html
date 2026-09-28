@@ -1,0 +1,128 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Walkman</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  html, body, #map { margin: 0; height: 100%; background: #000; }
+  #hud { position: fixed; top: 0; left: 0; right: 0; z-index: 1000; display: flex; justify-content: space-between;
+         padding: 10px 16px; font: bold 16px monospace; color: #ff0; background: rgba(0,0,0,.75); }
+  #msg { position: fixed; inset: 0; z-index: 1001; display: flex; align-items: center; justify-content: center;
+         flex-direction: column; font: bold 28px monospace; color: #ff0; background: rgba(0,0,0,.8); text-align: center; }
+  #msg button { margin-top: 20px; font: bold 20px monospace; padding: 12px 24px; background: #ff0; border: 0; }
+  .leaflet-tile-pane { filter: invert(1) hue-rotate(200deg) brightness(.7); }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="hud"><span id="score">SCORE 0</span><span id="dist">0 m</span><span id="lives">♥♥♥</span></div>
+<div id="msg">WALKMAN<br><small style="font-size:14px">Walk to eat dots. Avoid ghosts.<br>Arrow keys = simulate walking.</small><button id="start">START</button></div>
+<script>
+const DOT_SPACING = 25, FIELD_RADIUS = 200, EAT_RADIUS = 12, CATCH_RADIUS = 10;
+const GHOST_SPEED = 0.9, POWER_MS = 30000; // m/s, slower than walking (~1.4)
+const GHOST_COLORS = ['#f00', '#fbb', '#0ff', '#fa0'];
+
+const map = L.map('map', { zoomControl: false }).setView([60.17, 24.94], 17);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OSM' }).addTo(map);
+
+let player, pos, dots = [], ghosts = [], score = 0, lives = 3, walked = 0, powerUntil = 0, started = false, sim = false, over = false;
+const $ = id => document.getElementById(id);
+
+// meters <-> latlng offsets
+const offset = (ll, dx, dy) => L.latLng(ll.lat + dy / 111320, ll.lng + dx / (111320 * Math.cos(ll.lat * Math.PI / 180)));
+const dist = (a, b) => map.distance(a, b);
+
+function setup(origin) {
+  map.setView(origin, 18);
+  player = L.circleMarker(origin, { radius: 10, color: '#ff0', fillColor: '#ff0', fillOpacity: 1 }).addTo(map);
+  for (let x = -FIELD_RADIUS; x <= FIELD_RADIUS; x += DOT_SPACING)
+    for (let y = -FIELD_RADIUS; y <= FIELD_RADIUS; y += DOT_SPACING) {
+      if (Math.hypot(x, y) > FIELD_RADIUS || Math.hypot(x, y) < EAT_RADIUS) continue;
+      const power = Math.abs(x) === Math.abs(y) && Math.abs(x) >= 125 && Math.abs(x) < 150;
+      const ll = offset(origin, x, y);
+      dots.push({ ll, power, m: L.circleMarker(ll, { radius: power ? 7 : 3, color: '#fcb', fillOpacity: 1, weight: 0, fillColor: '#fcb' }).addTo(map) });
+    }
+  GHOST_COLORS.forEach((c, i) => {
+    const a = i * Math.PI / 2 + Math.PI / 4;
+    const ll = offset(origin, Math.cos(a) * FIELD_RADIUS, Math.sin(a) * FIELD_RADIUS);
+    ghosts.push({ ll, home: ll, color: c, m: L.circleMarker(ll, { radius: 9, color: c, fillColor: c, fillOpacity: 1 }).addTo(map) });
+  });
+  pos = origin;
+  started = true;
+  setInterval(tick, 1000);
+}
+
+function moveTo(ll) {
+  if (over) return;
+  if (!started) return setup(ll);
+  walked += dist(pos, ll);
+  pos = ll;
+  player.setLatLng(ll);
+  map.panTo(ll, { animate: true });
+  dots = dots.filter(d => {
+    if (dist(d.ll, pos) > EAT_RADIUS) return true;
+    map.removeLayer(d.m);
+    score += d.power ? 50 : 10;
+    if (d.power) powerUntil = Date.now() + POWER_MS;
+    return false;
+  });
+  if (!dots.length) end('YOU WIN!');
+  hud();
+}
+
+function tick() {
+  if (over) return;
+  const scared = Date.now() < powerUntil;
+  ghosts.forEach(g => {
+    if (over) return;
+    const d = dist(g.ll, pos);
+    if (d > 1) {
+      const step = Math.min(GHOST_SPEED, d) * (scared ? -0.5 : 1) / d; // flee when scared
+      g.ll = L.latLng(g.ll.lat + (pos.lat - g.ll.lat) * step, g.ll.lng + (pos.lng - g.ll.lng) * step);
+    }
+    const c = scared ? '#22f' : g.color;
+    g.m.setLatLng(g.ll).setStyle({ color: c, fillColor: c });
+    if (dist(g.ll, pos) < CATCH_RADIUS) {
+      if (scared) { score += 200; g.ll = g.home; }
+      else if (--lives <= 0) return end('GAME OVER');
+      else ghosts.forEach(h => h.ll = h.home);
+      if (navigator.vibrate) navigator.vibrate(300);
+    }
+  });
+  hud();
+}
+
+function hud() {
+  $('score').textContent = 'SCORE ' + score;
+  $('dist').textContent = Math.round(walked) + ' m' + (Date.now() < powerUntil ? ' ⚡' : '');
+  $('lives').textContent = '♥'.repeat(Math.max(lives, 0));
+}
+
+function end(text) {
+  over = true;
+  $('msg').innerHTML = `${text}<br>SCORE ${score}<br>${Math.round(walked)} m walked<button onclick="location.reload()">AGAIN</button>`;
+  $('msg').style.display = 'flex';
+}
+
+$('start').onclick = () => {
+  $('msg').style.display = 'none';
+  if (!navigator.geolocation) return startSim();
+  navigator.geolocation.watchPosition(
+    p => { if (!sim && (p.coords.accuracy < 50 || !started)) moveTo(L.latLng(p.coords.latitude, p.coords.longitude)); },
+    startSim, { enableHighAccuracy: true, maximumAge: 0 });
+};
+function startSim() { if (!started) { sim = true; moveTo(map.getCenter()); } }
+
+// Simulate walking with arrow keys (5 m per press)
+addEventListener('keydown', e => {
+  const k = { ArrowUp: [0, 5], ArrowDown: [0, -5], ArrowLeft: [-5, 0], ArrowRight: [5, 0] }[e.key];
+  if (!k || !pos) return;
+  sim = true;
+  moveTo(offset(pos, ...k));
+});
+</script>
+</body>
+</html>
