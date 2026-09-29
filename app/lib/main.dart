@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
+import 'game/glide.dart';
 import 'game_controller.dart';
 import 'pacman_painter.dart';
 
@@ -35,7 +37,15 @@ class GameScreen extends StatefulWidget {
 class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   late final GameController controller;
   late final AnimationController mouthAnim;
+  late final Ticker _glideTicker;
   final MapController mapController = MapController();
+
+  // Display-only marker animation (feature: glide between positions). Keyed
+  // by 'player' or 'ghost$i'. Game logic never reads these; they only drive
+  // where markers are painted.
+  final Map<Object, LatLng> _displayPos = {};
+  final Map<Object, MarkerGlide> _glides = {};
+  bool _wasStarted = false;
 
   @override
   void initState() {
@@ -46,19 +56,67 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       vsync: this,
       duration: const Duration(milliseconds: 250),
     )..repeat(reverse: true);
+    _glideTicker = createTicker((_) => setState(() {}))..start();
   }
 
   void _onControllerChanged() {
+    // A fresh game (new origin/ghosts) starting shouldn't glide in from the
+    // previous game's stale marker positions.
+    if (controller.started && !_wasStarted) {
+      _displayPos.clear();
+      _glides.clear();
+    }
+    _wasStarted = controller.started;
+
     final p = controller.pos;
     if (p != null) {
+      _updateGlide('player', p, jump: false);
       final zoom = controller.started ? 18.0 : mapController.camera.zoom;
       try {
-        mapController.move(p, zoom);
+        mapController.move(p, zoom); // follow the true position
       } catch (_) {
         // Map not laid out yet; ignore.
       }
     }
+    final justHome = controller.ghostsJustSentHome;
+    final ghosts = controller.renderGhosts;
+    for (int i = 0; i < ghosts.length; i++) {
+      _updateGlide('ghost$i', ghosts[i].ll, jump: justHome.contains(i));
+    }
     setState(() {});
+  }
+
+  /// Starts (or restarts, from wherever the marker currently is) a glide to
+  /// [target], or jumps straight there when [jump] is true (e.g. a ghost
+  /// sent home).
+  void _updateGlide(Object key, LatLng target, {required bool jump}) {
+    if (jump) {
+      _displayPos[key] = target;
+      _glides.remove(key);
+      return;
+    }
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final current = _glides[key]?.positionAt(nowMs) ?? _displayPos[key];
+    if (current == null) {
+      // First sighting of this marker: place it directly, no glide.
+      _displayPos[key] = target;
+      return;
+    }
+    _glides[key] = MarkerGlide(from: current, to: target, startMs: nowMs);
+  }
+
+  /// The current animated position of marker [key], falling back to
+  /// [truePos] if it hasn't been seen by [_updateGlide] yet.
+  LatLng _displayed(Object key, LatLng truePos) {
+    final glide = _glides[key];
+    if (glide == null) return _displayPos[key] ?? truePos;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    if (glide.isDone(nowMs)) {
+      _glides.remove(key);
+      _displayPos[key] = glide.to;
+      return glide.to;
+    }
+    return glide.positionAt(nowMs);
   }
 
   @override
@@ -66,6 +124,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     controller.removeListener(_onControllerChanged);
     controller.dispose();
     mouthAnim.dispose();
+    _glideTicker.dispose();
     super.dispose();
   }
 
@@ -111,13 +170,13 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         ),
         CircleLayer(
           circles: [
-            for (final g in controller.renderGhosts)
+            for (int i = 0; i < controller.renderGhosts.length; i++)
               CircleMarker(
-                point: g.ll,
+                point: _displayed('ghost$i', controller.renderGhosts[i].ll),
                 radius: 9,
-                color: g.color,
+                color: controller.renderGhosts[i].color,
                 borderStrokeWidth: 2,
-                borderColor: g.color,
+                borderColor: controller.renderGhosts[i].color,
               ),
           ],
         ),
@@ -125,17 +184,23 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
           MarkerLayer(
             markers: [
               Marker(
-                point: controller.pos!,
+                point: _displayed('player', controller.pos!),
                 width: 28,
                 height: 28,
-                child: AnimatedBuilder(
-                  animation: Listenable.merge([controller.chomping, mouthAnim]),
-                  builder: (context, _) => CustomPaint(
-                    painter: PacmanPainter(
-                      headingRadians: controller.heading,
-                      mouthOpen: controller.chomping.value
-                          ? mouthAnim.value
-                          : 0,
+                child: Opacity(
+                  opacity: controller.onRoad ? 1.0 : 0.5,
+                  child: AnimatedBuilder(
+                    animation: Listenable.merge([
+                      controller.chomping,
+                      mouthAnim,
+                    ]),
+                    builder: (context, _) => CustomPaint(
+                      painter: PacmanPainter(
+                        headingRadians: controller.heading,
+                        mouthOpen: controller.chomping.value
+                            ? mouthAnim.value
+                            : 0,
+                      ),
                     ),
                   ),
                 ),

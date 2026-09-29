@@ -18,6 +18,7 @@ import 'game/ghosts.dart';
 import 'game/graph.dart';
 import 'game/roads.dart';
 import 'game/sampling.dart';
+import 'game/snap.dart';
 import 'game/sound.dart';
 
 class _Dot {
@@ -42,6 +43,7 @@ class GameController extends ChangeNotifier {
   double walked = 0;
   double heading = 0; // radians, 0 = east
   String statusText = 'GPS: waiting';
+  bool onRoad = true; // false = raw GPS pos is > snapMax from any road
 
   LatLng? origin;
   LatLng? pos;
@@ -66,6 +68,16 @@ class GameController extends ChangeNotifier {
   bool _wakaFlip = false;
   bool _settingUp = false;
   Pt? _headingFrom;
+
+  // Road snapping (feature: snap player to roads). Raw, unclipped way
+  // geometry; empty in grid mode, where snapping is disabled.
+  List<List<Pt>> _roadLines = [];
+  int _lastLine = -1;
+
+  // Ghost indices sent home (eaten, or reset after a catch) on the most
+  // recent ghost tick; those markers should jump instead of gliding.
+  final Set<int> _ghostsSentHomeThisTick = {};
+  Set<int> get ghostsJustSentHome => Set.unmodifiable(_ghostsSentHomeThisTick);
 
   Timer? _ghostTicker;
   Timer? _chompTimer;
@@ -180,12 +192,33 @@ class GameController extends ChangeNotifier {
     moveTo(offsetLatLng(base, dx, dy));
   }
 
-  void moveTo(LatLng ll) {
+  void moveTo(LatLng rawLl) {
     if (over) return;
     if (!started) {
-      unawaited(_setup(ll));
+      unawaited(_setup(rawLl));
       return;
     }
+    final o = origin!;
+
+    // Snap the raw fix onto the nearest road before using it for anything
+    // else (eating, catching, walked distance, heading, flying position).
+    // Grid mode (no road lines) never snaps.
+    var ll = rawLl;
+    if (_roadLines.isNotEmpty) {
+      final snapped = snapToRoad(
+        _roadLines,
+        toXY(o, rawLl),
+        lastLine: _lastLine,
+      );
+      onRoad = snapped != null;
+      if (snapped != null) {
+        _lastLine = snapped.lineIndex;
+        ll = offsetLatLng(o, snapped.xy.x, snapped.xy.y);
+      }
+    } else {
+      onRoad = true;
+    }
+
     if (flying) {
       chomping.value = false;
       pos = ll;
@@ -193,7 +226,6 @@ class GameController extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    final o = origin!;
     final prevPos = pos;
     if (prevPos != null) walked += llDistance(prevPos, ll);
 
@@ -242,15 +274,19 @@ class GameController extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final chains = await fetchRoadChains(originLl);
-      final g = buildGraph(chains, roadLinkProximity);
+      final result = await fetchRoadChains(originLl);
+      final g = buildGraph(result.chains, roadLinkProximity);
       if (g.nodes.length < 10) throw Exception('too few roads');
       graph = g;
+      _roadLines = result.rawLines;
       statusText = '${g.nodes.length} dots on roads';
     } catch (_) {
       graph = buildGraph(gridChains(), gridLinkProximity);
+      _roadLines = []; // grid mode: no snapping
       statusText = 'Roads failed, grid mode';
     }
+    _lastLine = -1;
+    onRoad = true;
 
     final nodes = graph!.nodes;
     final power = powerPelletIndices(nodes);
@@ -286,14 +322,16 @@ class GameController extends ChangeNotifier {
 
   void _tickGhosts() {
     if (over || flying || graph == null || pos == null) return;
+    _ghostsSentHomeThisTick.clear();
     final o = origin!;
     final isScared = scared;
     final me = toXY(o, pos!);
     final meNode = nearestNode(graph!, me);
     final hops = bfs(graph!, meNode);
 
-    for (final g in ghosts) {
+    for (int i = 0; i < ghosts.length; i++) {
       if (over) break;
+      final g = ghosts[i];
       tickGhost(
         graph: graph!,
         g: g,
@@ -307,14 +345,16 @@ class GameController extends ChangeNotifier {
         if (isScared) {
           score += scoreGhost;
           g.sendHome(graph!);
+          _ghostsSentHomeThisTick.add(i);
         } else {
           lives -= 1;
           if (lives <= 0) {
             _end(win: false);
             break;
           }
-          for (final gg in ghosts) {
-            gg.sendHome(graph!);
+          for (int j = 0; j < ghosts.length; j++) {
+            ghosts[j].sendHome(graph!);
+            _ghostsSentHomeThisTick.add(j);
           }
         }
         HapticFeedback.heavyImpact();
@@ -366,6 +406,10 @@ class GameController extends ChangeNotifier {
     walked = 0;
     heading = 0;
     powerUntil = null;
+    onRoad = true;
+    _roadLines = [];
+    _lastLine = -1;
+    _ghostsSentHomeThisTick.clear();
     _dots.clear();
     ghosts.clear();
     graph = null;

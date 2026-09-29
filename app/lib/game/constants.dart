@@ -24,6 +24,13 @@ const int onFootWindowMs = 10000; // step/status freshness window
 
 const int graphMergeDivisor = 1; // unused placeholder (kept for parity)
 
+// Road snapping (matches SNAP_MAX / SWITCH_ROAD_PENALTY in index.html).
+const double snapMax = 25; // m: farther than this from any road = off road
+const double switchRoadPenalty = 5; // m: penalty for leaving the current road
+
+// Marker glide: markers animate to their new position over this long.
+const int glideDurationMs = 1000;
+
 // Graph link thresholds (matches DOT_SPACING * 0.7 / * 1.05 in index.html).
 const double roadLinkProximity = dotSpacing * 0.7; // 17.5 m
 const double gridLinkProximity = dotSpacing * 1.05; // 26.25 m

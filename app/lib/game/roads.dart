@@ -23,10 +23,14 @@ String overpassQuery(double lat, double lng, {double radius = fieldRadius}) {
 }
 
 /// Fetches walkable ways around [origin] from the first Overpass mirror that
-/// responds, and samples each way into a chain of points every
-/// [dotSpacing] meters (plus its end vertex), in flat XY meters relative to
+/// responds.
+///
+/// [chains] samples each way into a chain of points every [dotSpacing]
+/// meters (plus its end vertex), for building the dot graph. [rawLines]
+/// holds each way's full, unsampled, unclipped geometry, for snapping the
+/// player to the nearest road. Both are in flat XY meters relative to
 /// [origin]. Throws if every mirror fails.
-Future<List<List<Pt>>> fetchRoadChains(
+Future<({List<List<Pt>> chains, List<List<Pt>> rawLines})> fetchRoadChains(
   LatLng origin, {
   http.Client? client,
 }) async {
@@ -54,6 +58,7 @@ Future<List<List<Pt>>> fetchRoadChains(
 
   final elements = (data['elements'] as List?) ?? const [];
   final chains = <List<Pt>>[];
+  final rawLines = <List<Pt>>[];
   for (final el in elements) {
     final geometry = (el['geometry'] as List?) ?? const [];
     if (geometry.isEmpty) continue;
@@ -64,7 +69,8 @@ Future<List<List<Pt>>> fetchRoadChains(
           LatLng((v['lat'] as num).toDouble(), (v['lon'] as num).toDouble()),
         ),
     ];
+    rawLines.add(xy);
     chains.add(sampleWay(xy, dotSpacing));
   }
-  return chains;
+  return (chains: chains, rawLines: rawLines);
 }
