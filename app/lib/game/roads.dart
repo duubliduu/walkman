@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
@@ -13,6 +14,26 @@ const List<String> overpassUrls = [
   'https://overpass.private.coffee/api/interpreter',
   'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
 ];
+
+const overpassUserAgent = 'walkman/1.0 (com.duubliduu.walkman)';
+
+/// Completes with the first future that succeeds; fails only if all fail.
+Future<T> _firstSuccess<T>(Iterable<Future<T>> futures) {
+  final done = Completer<T>();
+  final list = futures.toList();
+  var pending = list.length;
+  for (final f in list) {
+    f.then(
+      (v) {
+        if (!done.isCompleted) done.complete(v);
+      },
+      onError: (Object e) {
+        if (--pending == 0 && !done.isCompleted) done.completeError(e);
+      },
+    );
+  }
+  return done.future;
+}
 
 const _highwayTypes =
     'footway|path|pedestrian|residential|living_street|service|unclassified|tertiary|secondary|primary|cycleway|steps|track';
@@ -36,21 +57,26 @@ Future<({List<List<Pt>> chains, List<List<Pt>> rawLines})> fetchRoadChains(
 }) async {
   final c = client ?? http.Client();
   final q = overpassQuery(origin.latitude, origin.longitude);
+  // Query every mirror at once and take the first good answer: public
+  // Overpass servers are often slow (20 s+), overloaded or rate-limited.
+  // overpass-api.de rejects Dart's default User-Agent with 406, so send ours.
+  Future<Map<String, dynamic>> ask(String url) async {
+    final res = await c
+        .post(
+          Uri.parse(url),
+          headers: {'User-Agent': overpassUserAgent},
+          body: {'data': q},
+        )
+        .timeout(const Duration(seconds: 30));
+    if (res.statusCode != 200) throw Exception('$url: ${res.statusCode}');
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
   Map<String, dynamic>? data;
   try {
-    for (final url in overpassUrls) {
-      try {
-        final res = await http
-            .post(Uri.parse(url), body: {'data': q})
-            .timeout(const Duration(seconds: 12));
-        if (res.statusCode == 200) {
-          data = jsonDecode(res.body) as Map<String, dynamic>;
-          break;
-        }
-      } catch (_) {
-        // try next mirror
-      }
-    }
+    data = await _firstSuccess(overpassUrls.map(ask));
+  } catch (_) {
+    data = null;
   } finally {
     if (client == null) c.close();
   }
