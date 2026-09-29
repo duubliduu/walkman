@@ -48,7 +48,7 @@ const dist = (a, b) => map.distance(a, b);
 
 // Walkable roads from OpenStreetMap, sampled into dots every DOT_SPACING m
 const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.private.coffee/api/interpreter', 'https://maps.mail.ru/osm/tools/overpass/api/interpreter'];
-async function roadPoints(origin) {
+async function roadChains(origin) {
   const q = `[out:json][timeout:15];way["highway"~"^(footway|path|pedestrian|residential|living_street|service|unclassified|tertiary|secondary|primary|cycleway|steps|track)$"](around:${FIELD_RADIUS},${origin.lat},${origin.lng});out geom;`;
   let data;
   for (const url of OVERPASS) {
@@ -58,64 +58,101 @@ async function roadPoints(origin) {
     } catch (e) {}
   }
   if (!data) throw new Error('no overpass server');
-  const kx = 111320 * Math.cos(origin.lat * Math.PI / 180), ky = 111320;
-  const toXY = g => [(g.lon - origin.lng) * kx, (g.lat - origin.lat) * ky];
-  const pts = [];
-  for (const way of data.elements) {
-    const g = way.geometry.map(toXY);
+  // Each way becomes a chain of points every DOT_SPACING m, plus its end vertex
+  return data.elements.map(way => {
+    const g = way.geometry.map(v => toXY(L.latLng(v.lat, v.lon))), chain = [];
     let carry = 0;
     for (let i = 1; i < g.length; i++) {
       const [x0, y0] = g[i - 1], [x1, y1] = g[i], len = Math.hypot(x1 - x0, y1 - y0);
-      for (let t = carry; t < len; t += DOT_SPACING) pts.push([x0 + (x1 - x0) * t / len, y0 + (y1 - y0) * t / len]);
+      for (let t = carry; t < len; t += DOT_SPACING) chain.push([x0 + (x1 - x0) * t / len, y0 + (y1 - y0) * t / len]);
       carry = (carry - len) % DOT_SPACING; if (carry < 0) carry += DOT_SPACING;
     }
-  }
-  // Clip to field, drop near-duplicates where roads cross
-  const kept = [];
-  for (const p of pts) {
-    const r = Math.hypot(...p);
-    if (r > FIELD_RADIUS || r < EAT_RADIUS) continue;
-    if (kept.some(k => Math.hypot(k[0] - p[0], k[1] - p[1]) < DOT_SPACING * 0.6)) continue;
-    kept.push(p);
-  }
-  if (kept.length < 10) throw new Error('too few roads');
-  return kept;
+    chain.push(g[g.length - 1]);
+    return chain;
+  });
 }
 
-function gridPoints() {
-  const pts = [];
+function gridChains() {
+  const chains = [];
   for (let x = -FIELD_RADIUS; x <= FIELD_RADIUS; x += DOT_SPACING)
-    for (let y = -FIELD_RADIUS; y <= FIELD_RADIUS; y += DOT_SPACING)
-      if (Math.hypot(x, y) <= FIELD_RADIUS && Math.hypot(x, y) >= EAT_RADIUS) pts.push([x, y]);
-  return pts;
+    for (let y = -FIELD_RADIUS; y <= FIELD_RADIUS; y += DOT_SPACING) chains.push([[x, y]]);
+  return chains;
 }
 
-let loading = false;
-async function setup(origin) {
+// Road graph: nodes = dots. Edges link consecutive points on a road, plus
+// nodes closer than `prox` (joins roads where they cross or meet).
+function buildGraph(chains, prox) {
+  const nodes = [], adj = [];
+  const link = (a, b) => { if (a !== b) { adj[a].add(b); adj[b].add(a); } };
+  const nodeFor = p => {
+    if (Math.hypot(...p) > FIELD_RADIUS) return -1;
+    const near = nodes.findIndex(n => Math.hypot(n[0] - p[0], n[1] - p[1]) < DOT_SPACING * 0.6);
+    if (near >= 0) return near;
+    nodes.push(p); adj.push(new Set());
+    return nodes.length - 1;
+  };
+  for (const chain of chains) {
+    let prev = -1;
+    for (const p of chain) { const i = nodeFor(p); if (i >= 0 && prev >= 0) link(i, prev); prev = i; }
+  }
+  for (let a = 0; a < nodes.length; a++)
+    for (let b = a + 1; b < nodes.length; b++)
+      if (Math.hypot(nodes[a][0] - nodes[b][0], nodes[a][1] - nodes[b][1]) < prox) link(a, b);
+  return { nodes, adj: adj.map(s => [...s]) };
+}
+
+// Hops from `from` to every node (Infinity = unreachable)
+function bfs(from) {
+  const d = new Array(graph.nodes.length).fill(Infinity), queue = [from];
+  d[from] = 0;
+  for (let i = 0; i < queue.length; i++)
+    for (const n of graph.adj[queue[i]]) if (d[n] === Infinity) { d[n] = d[queue[i]] + 1; queue.push(n); }
+  return d;
+}
+const nearestNode = xy => graph.nodes.reduce((best, n, i) =>
+  Math.hypot(n[0] - xy[0], n[1] - xy[1]) < Math.hypot(graph.nodes[best][0] - xy[0], graph.nodes[best][1] - xy[1]) ? i : best, 0);
+
+let loading = false, origin, graph;
+const toXY = ll => [(ll.lng - origin.lng) * 111320 * Math.cos(origin.lat * Math.PI / 180), (ll.lat - origin.lat) * 111320];
+async function setup(o) {
   if (loading) return;
   loading = true;
+  origin = o;
   map.setView(origin, 18);
   $('gps').textContent = 'Loading roads…';
-  let pts;
-  try { pts = await roadPoints(origin); $('gps').textContent = pts.length + ' dots on roads'; }
-  catch (e) { pts = gridPoints(); $('gps').textContent = 'Roads failed, grid mode'; }
+  try {
+    graph = buildGraph(await roadChains(origin), DOT_SPACING * 0.7);
+    if (graph.nodes.length < 10) throw new Error('too few roads');
+    $('gps').textContent = graph.nodes.length + ' dots on roads';
+  } catch (e) {
+    graph = buildGraph(gridChains(), DOT_SPACING * 1.05);
+    $('gps').textContent = 'Roads failed, grid mode';
+  }
+  const pts = graph.nodes;
   // Power pellet = farthest dot in each quadrant
   const power = new Set([0, 1, 2, 3].map(qd => pts.reduce((best, p, i) =>
-    (p[0] >= 0) === (qd & 1 ? true : false) && (p[1] >= 0) === (qd & 2 ? true : false) && (best < 0 || Math.hypot(...p) > Math.hypot(...pts[best])) ? i : best, -1)));
+    (p[0] >= 0) === !!(qd & 1) && (p[1] >= 0) === !!(qd & 2) && (best < 0 || Math.hypot(...p) > Math.hypot(...pts[best])) ? i : best, -1)));
   pts.forEach((p, i) => {
+    if (Math.hypot(...p) < EAT_RADIUS) return;
     const ll = offset(origin, ...p), pw = power.has(i);
     dots.push({ ll, power: pw, m: L.circleMarker(ll, { radius: pw ? 8 : 4, weight: 0, fillOpacity: 1, fillColor: '#fcb' }).addTo(map) });
   });
+  // Ghosts start on road nodes near the field's diagonals, in the player's network
+  const reach = bfs(nearestNode([0, 0]));
   GHOST_COLORS.forEach((c, i) => {
-    const a = i * Math.PI / 2 + Math.PI / 4;
-    const ll = offset(origin, Math.cos(a) * FIELD_RADIUS, Math.sin(a) * FIELD_RADIUS);
-    ghosts.push({ ll, home: ll, color: c, m: L.circleMarker(ll, { radius: 9, color: c, fillColor: c, fillOpacity: 1 }).addTo(map) });
+    const a = i * Math.PI / 2 + Math.PI / 4, spot = [Math.cos(a) * FIELD_RADIUS * 0.9, Math.sin(a) * FIELD_RADIUS * 0.9];
+    const home = pts.reduce((best, n, j) => reach[j] < Infinity && (best < 0 ||
+      Math.hypot(n[0] - spot[0], n[1] - spot[1]) < Math.hypot(pts[best][0] - spot[0], pts[best][1] - spot[1])) ? j : best, -1);
+    const g = { home, color: c, m: L.circleMarker(offset(origin, ...pts[home]), { radius: 9, color: c, fillColor: c, fillOpacity: 1 }).addTo(map) };
+    sendHome(g);
+    ghosts.push(g);
   });
   player = L.circleMarker(origin, { radius: 10, color: '#ff0', fillColor: '#ff0', fillOpacity: 1 }).addTo(map);
   pos = origin;
   started = true;
   setInterval(tick, 1000);
 }
+function sendHome(g) { g.at = g.home; g.to = -1; g.xy = [...graph.nodes[g.home]]; }
 
 function moveTo(ll) {
   if (over) return;
@@ -128,6 +165,7 @@ function moveTo(ll) {
     if (dist(d.ll, pos) > EAT_RADIUS) return true;
     map.removeLayer(d.m);
     score += d.power ? 50 : 10;
+    buzz(d.power ? [80, 60, 80] : 25);
     if (d.power) powerUntil = Date.now() + POWER_MS;
     return false;
   });
@@ -135,26 +173,54 @@ function moveTo(ll) {
   hud();
 }
 
+// Ghosts walk the road graph: at each node pick the neighbor closest to the
+// player (or farthest when scared). On the player's node they step straight at them.
 function tick() {
   if (over) return;
-  const scared = Date.now() < powerUntil;
+  const scared = Date.now() < powerUntil, me = toXY(pos), meNode = nearestNode(me), hops = bfs(meNode);
+  const stepTo = (g, target, budget) => {
+    const d = Math.hypot(target[0] - g.xy[0], target[1] - g.xy[1]);
+    if (d <= budget) { g.xy = [...target]; return budget - d; }
+    g.xy = [g.xy[0] + (target[0] - g.xy[0]) * budget / d, g.xy[1] + (target[1] - g.xy[1]) * budget / d];
+    return 0;
+  };
   ghosts.forEach(g => {
     if (over) return;
-    const d = dist(g.ll, pos);
-    if (d > 1) {
-      const step = Math.min(GHOST_SPEED, d) * (scared ? -0.5 : 1) / d; // flee when scared
-      g.ll = L.latLng(g.ll.lat + (pos.lat - g.ll.lat) * step, g.ll.lng + (pos.lng - g.ll.lng) * step);
+    let budget = GHOST_SPEED * (scared ? 0.5 : 1);
+    for (let guard = 0; budget > 0 && guard < 10; guard++) {
+      if (g.to < 0) {
+        if (!scared && g.at === meNode) { stepTo(g, me, budget); break; }
+        const nb = graph.adj[g.at];
+        if (!nb.length) break;
+        const rank = n => hops[n] === Infinity ? Math.random() * 1e6 : hops[n] + Math.random() * 0.5;
+        g.to = nb.reduce((best, n) => (scared ? rank(n) > rank(best) : rank(n) < rank(best)) ? n : best);
+      }
+      budget = stepTo(g, graph.nodes[g.to], budget);
+      if (budget > 0 || Math.hypot(...graph.nodes[g.to].map((v, k) => v - g.xy[k])) < 0.01) { g.at = g.to; g.to = -1; }
     }
     const c = scared ? '#22f' : g.color;
-    g.m.setLatLng(g.ll).setStyle({ color: c, fillColor: c });
-    if (dist(g.ll, pos) < CATCH_RADIUS) {
-      if (scared) { score += 200; g.ll = g.home; }
+    g.m.setLatLng(offset(origin, ...g.xy)).setStyle({ color: c, fillColor: c });
+    if (Math.hypot(g.xy[0] - me[0], g.xy[1] - me[1]) < CATCH_RADIUS) {
+      if (scared) { score += 200; sendHome(g); }
       else if (--lives <= 0) return end('GAME OVER');
-      else ghosts.forEach(h => h.ll = h.home);
-      if (navigator.vibrate) navigator.vibrate(300);
+      else ghosts.forEach(sendHome);
+      buzz(300);
     }
   });
   hud();
+}
+
+// Haptics: Vibration API (Android). iOS Safari lacks it, but toggling a
+// native switch control (iOS 18+) plays a system haptic tick.
+const iosSwitch = Object.assign(document.createElement('input'), { type: 'checkbox' });
+iosSwitch.setAttribute('switch', '');
+const iosLabel = document.createElement('label');
+iosLabel.append(iosSwitch);
+iosLabel.style.cssText = 'position:fixed;opacity:0;pointer-events:none;left:0;top:0';
+document.body.append(iosLabel);
+function buzz(pattern) {
+  if (navigator.vibrate) navigator.vibrate(pattern);
+  else iosLabel.click();
 }
 
 function hud() {
