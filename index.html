@@ -27,10 +27,12 @@
   #flight[hidden] { display: none; }
   .pac { width: 28px; height: 28px; position: relative; }
   .pac i { position: absolute; left: 0; width: 28px; height: 14px; background: #ff0; }
-  .pac i:first-child { top: 0; border-radius: 14px 14px 0 0; transform-origin: 50% 100%; animation: jaw-top .25s infinite alternate; }
-  .pac i:last-child { bottom: 0; border-radius: 0 0 14px 14px; transform-origin: 50% 0; animation: jaw-bot .25s infinite alternate; }
-  @keyframes jaw-top { to { transform: rotate(-35deg); } }
-  @keyframes jaw-bot { to { transform: rotate(35deg); } }
+  .pac i:first-child { top: 0; border-radius: 14px 14px 0 0; transform-origin: 50% 100%; transform: rotate(-20deg); }
+  .pac i:last-child { bottom: 0; border-radius: 0 0 14px 14px; transform-origin: 50% 0; transform: rotate(20deg); }
+  .pac.moving i:first-child { animation: jaw-top .25s infinite alternate; }
+  .pac.moving i:last-child { animation: jaw-bot .25s infinite alternate; }
+  @keyframes jaw-top { from { transform: rotate(0); } to { transform: rotate(-35deg); } }
+  @keyframes jaw-bot { from { transform: rotate(0); } to { transform: rotate(35deg); } }
   @media (prefers-reduced-motion: reduce) { .pac i { animation: none !important; } }
   .leaflet-tile-pane { filter: invert(1) hue-rotate(200deg) brightness(.7); }
 </style>
@@ -124,7 +126,7 @@ function bfs(from) {
 const nearestNode = xy => graph.nodes.reduce((best, n, i) =>
   Math.hypot(n[0] - xy[0], n[1] - xy[1]) < Math.hypot(graph.nodes[best][0] - xy[0], graph.nodes[best][1] - xy[1]) ? i : best, 0);
 
-let loading = false, origin, graph, headingFrom;
+let loading = false, origin, graph, headingFrom, chompTimer;
 const toXY = ll => [(ll.lng - origin.lng) * 111320 * Math.cos(origin.lat * Math.PI / 180), (ll.lat - origin.lat) * 111320];
 async function setup(o) {
   if (loading) return;
@@ -170,12 +172,16 @@ function sendHome(g) { g.at = g.home; g.to = -1; g.xy = [...graph.nodes[g.home]]
 function moveTo(ll) {
   if (over) return;
   if (!started) return setup(ll);
-  if (flying) { pos = ll; headingFrom = null; player.setLatLng(ll); map.panTo(ll); return; }
+  if (flying) { player.getElement().firstChild.classList.remove('moving'); pos = ll; headingFrom = null; player.setLatLng(ll); map.panTo(ll); return; }
   walked += dist(pos, ll);
   // Face the direction of travel (0deg = east); ignore GPS jitter under 3 m
   const [x0, y0] = headingFrom ||= toXY(pos), [x1, y1] = toXY(ll);
   if (Math.hypot(x1 - x0, y1 - y0) >= 3) {
-    player.getElement().firstChild.style.transform = `rotate(${Math.atan2(-(y1 - y0), x1 - x0)}rad)`;
+    const pac = player.getElement().firstChild;
+    pac.style.transform = `rotate(${Math.atan2(-(y1 - y0), x1 - x0)}rad)`;
+    pac.classList.add('moving');
+    clearTimeout(chompTimer);
+    chompTimer = setTimeout(() => pac.classList.remove('moving'), 3000);
     headingFrom = [x1, y1];
   }
   pos = ll;
