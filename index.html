@@ -22,6 +22,13 @@
   #pad button:active { background: #ff0; color: #000; }
   #gps { position: fixed; left: 16px; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); z-index: 1000;
          font: 12px monospace; color: #ff0; background: rgba(0,0,0,.7); padding: 6px 8px; }
+  .pac { width: 28px; height: 28px; position: relative; }
+  .pac i { position: absolute; left: 0; width: 28px; height: 14px; background: #ff0; }
+  .pac i:first-child { top: 0; border-radius: 14px 14px 0 0; transform-origin: 50% 100%; animation: jaw-top .25s infinite alternate; }
+  .pac i:last-child { bottom: 0; border-radius: 0 0 14px 14px; transform-origin: 50% 0; animation: jaw-bot .25s infinite alternate; }
+  @keyframes jaw-top { to { transform: rotate(-35deg); } }
+  @keyframes jaw-bot { to { transform: rotate(35deg); } }
+  @media (prefers-reduced-motion: reduce) { .pac i { animation: none !important; } }
   .leaflet-tile-pane { filter: invert(1) hue-rotate(200deg) brightness(.7); }
 </style>
 </head>
@@ -112,7 +119,7 @@ function bfs(from) {
 const nearestNode = xy => graph.nodes.reduce((best, n, i) =>
   Math.hypot(n[0] - xy[0], n[1] - xy[1]) < Math.hypot(graph.nodes[best][0] - xy[0], graph.nodes[best][1] - xy[1]) ? i : best, 0);
 
-let loading = false, origin, graph;
+let loading = false, origin, graph, headingFrom;
 const toXY = ll => [(ll.lng - origin.lng) * 111320 * Math.cos(origin.lat * Math.PI / 180), (ll.lat - origin.lat) * 111320];
 async function setup(o) {
   if (loading) return;
@@ -147,7 +154,8 @@ async function setup(o) {
     sendHome(g);
     ghosts.push(g);
   });
-  player = L.circleMarker(origin, { radius: 10, color: '#ff0', fillColor: '#ff0', fillOpacity: 1 }).addTo(map);
+  player = L.marker(origin, { interactive: false, zIndexOffset: 1000,
+    icon: L.divIcon({ className: '', iconSize: [28, 28], html: '<div class="pac"><i></i><i></i></div>' }) }).addTo(map);
   pos = origin;
   started = true;
   setInterval(tick, 1000);
@@ -158,6 +166,12 @@ function moveTo(ll) {
   if (over) return;
   if (!started) return setup(ll);
   walked += dist(pos, ll);
+  // Face the direction of travel (0deg = east); ignore GPS jitter under 3 m
+  const [x0, y0] = headingFrom ||= toXY(pos), [x1, y1] = toXY(ll);
+  if (Math.hypot(x1 - x0, y1 - y0) >= 3) {
+    player.getElement().firstChild.style.transform = `rotate(${Math.atan2(-(y1 - y0), x1 - x0)}rad)`;
+    headingFrom = [x1, y1];
+  }
   pos = ll;
   player.setLatLng(ll);
   map.panTo(ll, { animate: true });
