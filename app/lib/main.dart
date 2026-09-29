@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter_map/flutter_map.dart';
@@ -56,7 +58,30 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       vsync: this,
       duration: const Duration(milliseconds: 250),
     )..repeat(reverse: true);
-    _glideTicker = createTicker((_) => setState(() {}))..start();
+    _glideTicker = createTicker(_onFrame)..start();
+  }
+
+  // Sprite radius (28 px Pac-Man) plus a regular dot's radius, in screen px.
+  static const double _eatPixels = 14 + 4;
+
+  /// Per frame: collide the Pac-Man as drawn (mid-glide) with dots on the
+  /// map, so eating (and its haptic/sound) lines up with what's on screen.
+  void _onFrame(Duration _) {
+    final truePos = controller.pos;
+    if (truePos != null && controller.started) {
+      try {
+        final cam = mapController.camera;
+        final drawn = _displayed('player', truePos);
+        final metersPerPixel =
+            156543.03392 *
+            math.cos(drawn.latitude * math.pi / 180) /
+            math.pow(2, cam.zoom);
+        controller.eatAt(drawn, _eatPixels * metersPerPixel);
+      } catch (_) {
+        // Map not laid out yet.
+      }
+    }
+    setState(() {});
   }
 
   void _onControllerChanged() {
@@ -95,6 +120,9 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       _glides.remove(key);
       return;
     }
+    // Already heading there (or standing there): don't restart the glide,
+    // which would stall it on every unrelated controller update.
+    if ((_glides[key]?.to ?? _displayPos[key]) == target) return;
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     final current = _glides[key]?.positionAt(nowMs) ?? _displayPos[key];
     if (current == null) {

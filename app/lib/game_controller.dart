@@ -243,10 +243,19 @@ class GameController extends ChangeNotifier {
       _headingFrom = xy1;
     }
     pos = ll;
+    notifyListeners();
+  }
 
+  /// Eats every dot within [radiusMeters] of [at], the Pac-Man position as
+  /// drawn on the map (mid-glide), so a dot disappears when the sprite
+  /// visibly touches it rather than when the GPS fix arrives.
+  void eatAt(LatLng at, double radiusMeters) {
+    final o = origin;
+    if (!started || over || flying || o == null) return;
+    final before = _dots.length;
     _dots.removeWhere((d) {
       final dll = offsetLatLng(o, d.xy.x, d.xy.y);
-      if (llDistance(dll, pos!) > eatRadius) return false;
+      if (llDistance(dll, at) > radiusMeters) return false;
       score += d.power ? scorePower : scoreDot;
       if (d.power) {
         HapticFeedback.heavyImpact();
@@ -258,6 +267,7 @@ class GameController extends ChangeNotifier {
       }
       return true;
     });
+    if (_dots.length == before) return;
 
     if (_dots.isEmpty) {
       _end(win: true);

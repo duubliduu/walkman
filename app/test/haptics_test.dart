@@ -34,7 +34,10 @@ void main() {
     expect(c.started, isTrue);
     expect(haptics, isEmpty);
 
-    c.moveTo(offsetLatLng(origin, 25, 0)); // onto the grid dot 25 m east
+    final dot = offsetLatLng(origin, 25, 0); // grid dot 25 m east
+    c.moveTo(dot);
+    expect(c.score, 0, reason: 'eating waits for the drawn sprite');
+    c.eatAt(dot, 10);
     expect(c.score, greaterThan(0));
     expect(haptics, contains('HapticFeedbackType.lightImpact'));
 
