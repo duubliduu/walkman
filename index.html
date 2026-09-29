@@ -166,6 +166,7 @@ function moveTo(ll) {
     map.removeLayer(d.m);
     score += d.power ? 50 : 10;
     buzz(d.power ? [80, 60, 80] : 25);
+    d.power ? tone(300, 900, 0.3) : waka();
     if (d.power) powerUntil = Date.now() + POWER_MS;
     return false;
   });
@@ -205,6 +206,7 @@ function tick() {
       else if (--lives <= 0) return end('GAME OVER');
       else ghosts.forEach(sendHome);
       buzz(300);
+      if (!scared) tone(700, 100, 0.8);
     }
   });
   hud();
@@ -223,6 +225,23 @@ function buzz(pattern) {
   else iosLabel.click();
 }
 
+// Sound: synthesized with Web Audio, unlocked by the START tap
+let audio, wakaFlip = false;
+function tone(from, to, secs) {
+  if (!audio) return;
+  const t = audio.currentTime, osc = audio.createOscillator(), gain = audio.createGain();
+  osc.type = 'triangle';
+  osc.frequency.setValueAtTime(from, t);
+  osc.frequency.linearRampToValueAtTime(to, t + secs);
+  gain.gain.setValueAtTime(0.3, t);
+  gain.gain.linearRampToValueAtTime(0, t + secs);
+  osc.connect(gain).connect(audio.destination);
+  osc.start(t);
+  osc.stop(t + secs);
+}
+// Alternate "wa" (falling) and "ka" (rising) like the arcade chomp
+function waka() { (wakaFlip = !wakaFlip) ? tone(500, 250, 0.12) : tone(250, 500, 0.12); }
+
 function hud() {
   $('score').textContent = 'SCORE ' + score;
   $('dist').textContent = Math.round(walked) + ' m' + (Date.now() < powerUntil ? ' ⚡' : '');
@@ -236,6 +255,7 @@ function end(text) {
 }
 
 $('start').onclick = () => {
+  try { audio = new (window.AudioContext || window.webkitAudioContext)(); audio.resume(); } catch (e) {}
   $('msg').style.display = 'none';
   const lock = () => navigator.wakeLock?.request('screen').catch(() => {});
   lock(); document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && lock());
