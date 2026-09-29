@@ -133,6 +133,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
+        fit: StackFit.expand,
         children: [
           Positioned.fill(child: _buildMap()),
           if (controller.launched) _buildHud(),
@@ -217,19 +218,28 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   }
 
   Widget _buildHud() {
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text('SCORE ${controller.score}', style: _hudStyle),
-            Text(
-              '${controller.walked.round()} m${controller.scared ? ' ⚡' : ''}',
-              style: _hudStyle,
+    return Positioned(
+      top: 0,
+      left: 0,
+      right: 0,
+      child: Container(
+        color: const Color(0xbf000000),
+        child: SafeArea(
+          bottom: false,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text('SCORE ${controller.score}', style: _hudStyle),
+                Text(
+                  '${controller.walked.round()} m${controller.scared ? ' ⚡' : ''}',
+                  style: _hudStyle,
+                ),
+                Text('♥' * controller.lives.clamp(0, 99), style: _hudStyle),
+              ],
             ),
-            Text('♥' * controller.lives.clamp(0, 99), style: _hudStyle),
-          ],
+          ),
         ),
       ),
     );
