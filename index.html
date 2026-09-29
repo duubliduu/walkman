@@ -22,6 +22,9 @@
   #pad button:active { background: #ff0; color: #000; }
   #gps { position: fixed; left: 16px; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); z-index: 1000;
          font: 12px monospace; color: #ff0; background: rgba(0,0,0,.7); padding: 6px 8px; }
+  #flight { position: fixed; left: 16px; right: 16px; top: calc(56px + env(safe-area-inset-top, 0px)); z-index: 1000;
+            padding: 12px; text-align: center; font: bold 18px monospace; color: #000; background: #0ff; }
+  #flight[hidden] { display: none; }
   .pac { width: 28px; height: 28px; position: relative; }
   .pac i { position: absolute; left: 0; width: 28px; height: 14px; background: #ff0; }
   .pac i:first-child { top: 0; border-radius: 14px 14px 0 0; transform-origin: 50% 100%; animation: jaw-top .25s infinite alternate; }
@@ -38,9 +41,11 @@
 <div id="msg">WALKMAN<br><small style="font-size:14px">Walk the streets to eat dots. Avoid ghosts.<br>No GPS? Use the arrows.</small><button id="start">START</button></div>
 <div id="pad" hidden><span></span><button data-d="0,5">▲</button><span></span><button data-d="-5,0">◀</button><span></span><button data-d="5,0">▶</button><span></span><button data-d="0,-5">▼</button><span></span></div>
 <div id="gps">GPS: waiting</div>
+<div id="flight" hidden>✈ FLIGHT MODE — PAUSED<br><small id="flight-speed"></small></div>
 <script>
 const DOT_SPACING = 25, FIELD_RADIUS = 200, EAT_RADIUS = 12, CATCH_RADIUS = 10;
 const GHOST_SPEED = 0.9, POWER_MS = 30000; // m/s, slower than walking (~1.4)
+const FLIGHT_KMH = 5, RESUME_KMH = 4.5, SPEED_WINDOW_MS = 10000; // above FLIGHT_KMH you're not walking
 const GHOST_COLORS = ['#f00', '#fbb', '#0ff', '#fa0'];
 
 const map = L.map('map', { zoomControl: false }).setView([60.17, 24.94], 17);
@@ -165,6 +170,7 @@ function sendHome(g) { g.at = g.home; g.to = -1; g.xy = [...graph.nodes[g.home]]
 function moveTo(ll) {
   if (over) return;
   if (!started) return setup(ll);
+  if (flying) { pos = ll; headingFrom = null; player.setLatLng(ll); map.panTo(ll); return; }
   walked += dist(pos, ll);
   // Face the direction of travel (0deg = east); ignore GPS jitter under 3 m
   const [x0, y0] = headingFrom ||= toXY(pos), [x1, y1] = toXY(ll);
@@ -191,7 +197,7 @@ function moveTo(ll) {
 // Ghosts walk the road graph: at each node pick the neighbor closest to the
 // player (or farthest when scared). On the player's node they step straight at them.
 function tick() {
-  if (over) return;
+  if (over || flying) return;
   const scared = Date.now() < powerUntil, me = toXY(pos), meNode = nearestNode(me), hops = bfs(meNode);
   const stepTo = (g, target, budget) => {
     const d = Math.hypot(target[0] - g.xy[0], target[1] - g.xy[1]);
@@ -256,6 +262,20 @@ function tone(from, to, secs) {
 // Alternate "wa" (falling) and "ka" (rising) like the arcade chomp
 function waka() { (wakaFlip = !wakaFlip) ? tone(500, 250, 0.12) : tone(250, 500, 0.12); }
 
+// Speed = distance over the last SPEED_WINDOW_MS of GPS fixes. Too fast = flight mode (paused).
+let fixes = [], flying = false;
+function trackSpeed(ll, t) {
+  fixes.push({ ll, t });
+  while (fixes.length > 2 && t - fixes[1].t >= SPEED_WINDOW_MS) fixes.shift();
+  const dt = (t - fixes[0].t) / 1000;
+  const kmh = dt >= 3 ? dist(fixes[0].ll, ll) / dt * 3.6 : 0;
+  if (!flying && kmh > FLIGHT_KMH) flying = true;
+  else if (flying && kmh < RESUME_KMH) flying = false;
+  $('flight').hidden = !flying;
+  $('flight-speed').textContent = kmh.toFixed(1) + ' km/h · slow to walking pace to resume';
+  return kmh;
+}
+
 function hud() {
   $('score').textContent = 'SCORE ' + score;
   $('dist').textContent = Math.round(walked) + ' m' + (Date.now() < powerUntil ? ' ⚡' : '');
@@ -275,7 +295,15 @@ $('start').onclick = () => {
   lock(); document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && lock());
   if (!navigator.geolocation) return startSim();
   navigator.geolocation.watchPosition(
-    p => { if (started) $('gps').textContent = 'GPS ±' + Math.round(p.coords.accuracy) + ' m'; if (!sim && (p.coords.accuracy < 50 || !started)) moveTo(L.latLng(p.coords.latitude, p.coords.longitude)); },
+    p => {
+      if (sim || (started && p.coords.accuracy >= 50)) return;
+      const ll = L.latLng(p.coords.latitude, p.coords.longitude);
+      if (started) {
+        const kmh = trackSpeed(ll, p.timestamp);
+        $('gps').textContent = 'GPS ±' + Math.round(p.coords.accuracy) + ' m · ' + kmh.toFixed(1) + ' km/h';
+      }
+      moveTo(ll);
+    },
     e => { $('gps').textContent = 'GPS off: ' + e.message; startSim(); }, { enableHighAccuracy: true, maximumAge: 0 });
 };
 function startSim() { $('pad').hidden = false; if (!started) { sim = true; moveTo(map.getCenter()); } }
